@@ -1,9 +1,6 @@
 package blackhole
 
 import (
-	"github.com/golang/protobuf/ptypes"
-	"github.com/golang/protobuf/ptypes/any"
-
 	"v2ray.com/core/common/buf"
 	"v2ray.com/core/common/serial"
 )
@@ -18,29 +15,23 @@ Content-Length: 0
 `
 )
 
+// ResponseConfig is the configuration for blackhole responses.
 type ResponseConfig interface {
-	AsAny() *any.Any
+	// WriteTo writes predefined response to the give buffer.
 	WriteTo(buf.Writer)
 }
 
+// WriteTo implements ResponseConfig.WriteTo().
 func (v *NoneResponse) WriteTo(buf.Writer) {}
 
-func (v *NoneResponse) AsAny() *any.Any {
-	r, _ := ptypes.MarshalAny(v)
-	return r
-}
-
+// WriteTo implements ResponseConfig.WriteTo().
 func (v *HTTPResponse) WriteTo(writer buf.Writer) {
 	b := buf.NewLocal(512)
 	b.AppendSupplier(serial.WriteString(http403response))
 	writer.Write(b)
 }
 
-func (v *HTTPResponse) AsAny() *any.Any {
-	r, _ := ptypes.MarshalAny(v)
-	return r
-}
-
+// GetInternalResponse converts response settings from proto to internal data structure.
 func (v *Config) GetInternalResponse() (ResponseConfig, error) {
 	if v.GetResponse() == nil {
 		return new(NoneResponse), nil
