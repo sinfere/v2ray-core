@@ -15,11 +15,13 @@ import (
 	v2net "v2ray.com/core/common/net"
 	"v2ray.com/core/common/protocol"
 	"v2ray.com/core/common/serial"
+	"v2ray.com/core/common/signal"
 	"v2ray.com/core/common/uuid"
 	"v2ray.com/core/proxy"
 	"v2ray.com/core/proxy/vmess"
 	"v2ray.com/core/proxy/vmess/encoding"
 	"v2ray.com/core/transport/internet"
+	"v2ray.com/core/transport/ray"
 )
 
 type userByEmail struct {
@@ -128,6 +130,48 @@ func (v *VMessInboundHandler) Start() error {
 	return nil
 }
 
+func transferRequest(session *encoding.ServerSession, request *protocol.RequestHeader, input io.Reader, output ray.OutputStream) error {
+	defer output.Close()
+
+	bodyReader := session.DecodeRequestBody(request, input)
+	defer bodyReader.Release()
+
+	if err := buf.PipeUntilEOF(bodyReader, output); err != nil {
+		return err
+	}
+	return nil
+}
+
+func transferResponse(session *encoding.ServerSession, request *protocol.RequestHeader, response *protocol.ResponseHeader, input ray.InputStream, output io.Writer) error {
+	defer input.ForceClose()
+	session.EncodeResponseHeader(response, output)
+
+	bodyWriter := session.EncodeResponseBody(request, output)
+
+	// Optimize for small response packet
+	if data, err := input.Read(); err == nil {
+		if err := bodyWriter.Write(data); err != nil {
+			return err
+		}
+
+		if bufferedWriter, ok := output.(*bufio.BufferedWriter); ok {
+			bufferedWriter.SetBuffered(false)
+		}
+
+		if err := buf.PipeUntilEOF(input, bodyWriter); err != nil {
+			return err
+		}
+	}
+
+	if request.Option.Has(protocol.RequestOptionChunkStream) {
+		if err := bodyWriter.Write(buf.NewLocal(8)); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
 func (v *VMessInboundHandler) HandleConnection(connection internet.Connection) {
 	defer connection.Close()
 
@@ -155,13 +199,13 @@ func (v *VMessInboundHandler) HandleConnection(connection internet.Connection) {
 	if err != nil {
 		if errors.Cause(err) != io.EOF {
 			log.Access(connection.RemoteAddr(), "", log.AccessRejected, err)
-			log.Info("VMessIn: Invalid request from ", connection.RemoteAddr(), ": ", err)
+			log.Info("VMess|Inbound: Invalid request from ", connection.RemoteAddr(), ": ", err)
 		}
 		connection.SetReusable(false)
 		return
 	}
 	log.Access(connection.RemoteAddr(), request.Destination(), log.AccessAccepted, "")
-	log.Info("VMessIn: Received request for ", request.Destination())
+	log.Info("VMess|Inbound: Received request for ", request.Destination())
 
 	connection.SetReusable(request.Option.Has(protocol.RequestOptionConnectionReuse))
 
@@ -174,26 +218,15 @@ func (v *VMessInboundHandler) HandleConnection(connection internet.Connection) {
 	input := ray.InboundInput()
 	output := ray.InboundOutput()
 	defer input.Close()
-	defer output.Release()
-
-	var readFinish sync.Mutex
-	readFinish.Lock()
+	defer output.ForceClose()
 
 	userSettings := request.User.GetSettings()
 	connReader.SetTimeOut(userSettings.PayloadReadTimeout)
-	reader.SetCached(false)
+	reader.SetBuffered(false)
 
-	go func() {
-		bodyReader := session.DecodeRequestBody(request, reader)
-		if err := buf.PipeUntilEOF(bodyReader, input); err != nil {
-			log.Debug("VMess|Inbound: Error when sending data to outbound: ", err)
-			connection.SetReusable(false)
-		}
-		bodyReader.Release()
-
-		input.Close()
-		readFinish.Unlock()
-	}()
+	requestDone := signal.ExecuteAsync(func() error {
+		return transferRequest(session, request, reader, input)
+	})
 
 	writer := bufio.NewWriter(connection)
 	defer writer.Release()
@@ -206,34 +239,21 @@ func (v *VMessInboundHandler) HandleConnection(connection internet.Connection) {
 		response.Option.Set(protocol.ResponseOptionConnectionReuse)
 	}
 
-	session.EncodeResponseHeader(response, writer)
+	responseDone := signal.ExecuteAsync(func() error {
+		return transferResponse(session, request, response, output, writer)
+	})
 
-	bodyWriter := session.EncodeResponseBody(request, writer)
-
-	// Optimize for small response packet
-	if data, err := output.Read(); err == nil {
-		if err := bodyWriter.Write(data); err != nil {
-			connection.SetReusable(false)
-		}
-
-		writer.SetCached(false)
-
-		if err := buf.PipeUntilEOF(output, bodyWriter); err != nil {
-			log.Debug("VMess|Inbound: Error when sending data to downstream: ", err)
-			connection.SetReusable(false)
-		}
-
+	if err := signal.ErrorOrFinish2(requestDone, responseDone); err != nil {
+		log.Info("VMess|Inbound: Connection ending with ", err)
+		connection.SetReusable(false)
+		return
 	}
-	output.Release()
-	if request.Option.Has(protocol.RequestOptionChunkStream) {
-		if err := bodyWriter.Write(buf.NewLocal(8)); err != nil {
-			connection.SetReusable(false)
-		}
-	}
-	writer.Flush()
-	bodyWriter.Release()
 
-	readFinish.Lock()
+	if err := writer.Flush(); err != nil {
+		log.Info("VMess|Inbound: Failed to flush remain data: ", err)
+		connection.SetReusable(false)
+		return
+	}
 }
 
 type Factory struct{}
@@ -271,5 +291,5 @@ func (v *Factory) Create(space app.Space, rawConfig interface{}, meta *proxy.Inb
 }
 
 func init() {
-	proxy.MustRegisterInboundHandlerCreator(serial.GetMessageType(new(Config)), new(Factory))
+	common.Must(proxy.RegisterInboundHandlerCreator(serial.GetMessageType(new(Config)), new(Factory)))
 }

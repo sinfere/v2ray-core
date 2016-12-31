@@ -18,3 +18,17 @@ type Releasable interface {
 	// Release releases all references to accelerate garbage collection.
 	Release()
 }
+
+// Release tries to release the given object.
+func Release(v interface{}) {
+	if releasable, ok := v.(Releasable); ok {
+		releasable.Release()
+	}
+}
+
+// Must panics if err is not nil.
+func Must(err error) {
+	if err != nil {
+		panic(err)
+	}
+}

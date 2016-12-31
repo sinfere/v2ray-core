@@ -5,11 +5,13 @@ import (
 
 	"v2ray.com/core/app"
 	"v2ray.com/core/app/dispatcher"
+	"v2ray.com/core/common"
 	"v2ray.com/core/common/buf"
 	"v2ray.com/core/common/errors"
 	"v2ray.com/core/common/log"
 	v2net "v2ray.com/core/common/net"
 	"v2ray.com/core/common/serial"
+	"v2ray.com/core/common/signal"
 	"v2ray.com/core/proxy"
 	"v2ray.com/core/transport/internet"
 	"v2ray.com/core/transport/internet/udp"
@@ -165,37 +167,42 @@ func (v *DokodemoDoor) HandleTCPConnection(conn internet.Connection) {
 		Destination: dest,
 		Inbound:     v.meta,
 	})
-	defer ray.InboundOutput().Release()
-
-	var wg sync.WaitGroup
+	output := ray.InboundOutput()
+	defer output.ForceClose()
 
 	reader := v2net.NewTimeOutReader(v.config.Timeout, conn)
 	defer reader.Release()
 
-	wg.Add(1)
-	go func() {
+	requestDone := signal.ExecuteAsync(func() error {
+		defer ray.InboundInput().Close()
+
 		v2reader := buf.NewReader(reader)
 		defer v2reader.Release()
 
 		if err := buf.PipeUntilEOF(v2reader, ray.InboundInput()); err != nil {
 			log.Info("Dokodemo: Failed to transport all TCP request: ", err)
+			return err
 		}
-		wg.Done()
-		ray.InboundInput().Close()
-	}()
 
-	wg.Add(1)
-	go func() {
+		return nil
+	})
+
+	responseDone := signal.ExecuteAsync(func() error {
+		defer output.ForceClose()
+
 		v2writer := buf.NewWriter(conn)
 		defer v2writer.Release()
 
-		if err := buf.PipeUntilEOF(ray.InboundOutput(), v2writer); err != nil {
+		if err := buf.PipeUntilEOF(output, v2writer); err != nil {
 			log.Info("Dokodemo: Failed to transport all TCP response: ", err)
+			return err
 		}
-		wg.Done()
-	}()
+		return nil
+	})
 
-	wg.Wait()
+	if err := signal.ErrorOrFinish2(requestDone, responseDone); err != nil {
+		log.Info("Dokodemo: Connection ends with ", err)
+	}
 }
 
 type Factory struct{}
@@ -211,5 +218,5 @@ func (v *Factory) Create(space app.Space, rawConfig interface{}, meta *proxy.Inb
 }
 
 func init() {
-	proxy.MustRegisterInboundHandlerCreator(serial.GetMessageType(new(Config)), new(Factory))
+	common.Must(proxy.RegisterInboundHandlerCreator(serial.GetMessageType(new(Config)), new(Factory)))
 }
