@@ -121,18 +121,10 @@ func (ws *wsconn) RemoteAddr() net.Addr {
 	return ws.wsc.RemoteAddr()
 }
 func (ws *wsconn) SetDeadline(t time.Time) error {
-	return func() error {
-		errr := ws.SetReadDeadline(t)
-		errw := ws.SetWriteDeadline(t)
-		if errr == nil || errw == nil {
-			return nil
-		}
-		if errr != nil {
-			return errr
-		}
-
-		return errw
-	}()
+	if err := ws.SetReadDeadline(t); err != nil {
+		return err
+	}
+	return ws.SetWriteDeadline(t)
 }
 func (ws *wsconn) SetReadDeadline(t time.Time) error {
 	return ws.wsc.SetReadDeadline(t)
@@ -159,18 +151,15 @@ func (ws *wsconn) setup() {
 }
 
 func (ws *wsconn) Reusable() bool {
-	return ws.reusable && !ws.connClosing
+	return ws.config.IsConnectionReuse() && ws.reusable && !ws.connClosing
 }
 
 func (ws *wsconn) SetReusable(reusable bool) {
-	if !ws.config.ConnectionReuse.IsEnabled() {
-		return
-	}
 	ws.reusable = reusable
 }
 
 func (ws *wsconn) pingPong() {
-	pongRcv := make(chan int, 0)
+	pongRcv := make(chan int, 1)
 	ws.wsc.SetPongHandler(func(data string) error {
 		pongRcv <- 0
 		return nil

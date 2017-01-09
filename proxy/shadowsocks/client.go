@@ -35,9 +35,7 @@ func NewClient(config *ClientConfig, space app.Space, meta *proxy.OutboundHandle
 }
 
 // Dispatch implements OutboundHandler.Dispatch().
-func (v *Client) Dispatch(destination v2net.Destination, payload *buf.Buffer, ray ray.OutboundRay) {
-	defer payload.Release()
-
+func (v *Client) Dispatch(destination v2net.Destination, ray ray.OutboundRay) {
 	network := destination.Network
 
 	var server *protocol.ServerSpec
@@ -89,21 +87,10 @@ func (v *Client) Dispatch(destination v2net.Destination, payload *buf.Buffer, ra
 
 	if request.Command == protocol.RequestCommandTCP {
 		bufferedWriter := bufio.NewWriter(conn)
-		defer bufferedWriter.Release()
-
 		bodyWriter, err := WriteTCPRequest(request, bufferedWriter)
-		defer bodyWriter.Release()
-
 		if err != nil {
 			log.Info("Shadowsocks|Client: Failed to write request: ", err)
 			return
-		}
-
-		if !payload.IsEmpty() {
-			if err := bodyWriter.Write(payload); err != nil {
-				log.Info("Shadowsocks|Client: Failed to write payload: ", err)
-				return
-			}
 		}
 
 		bufferedWriter.SetBuffered(false)
@@ -143,12 +130,6 @@ func (v *Client) Dispatch(destination v2net.Destination, payload *buf.Buffer, ra
 			Writer:  conn,
 			Request: request,
 		}
-		if !payload.IsEmpty() {
-			if err := writer.Write(payload); err != nil {
-				log.Info("Shadowsocks|Client: Failed to write payload: ", err)
-				return
-			}
-		}
 
 		requestDone := signal.ExecuteAsync(func() error {
 			defer ray.OutboundInput().ForceClose()
@@ -185,13 +166,13 @@ func (v *Client) Dispatch(destination v2net.Destination, payload *buf.Buffer, ra
 type ClientFactory struct{}
 
 // StreamCapability implements OutboundHandlerFactory.StreamCapability().
-func (v *ClientFactory) StreamCapability() v2net.NetworkList {
+func (ClientFactory) StreamCapability() v2net.NetworkList {
 	return v2net.NetworkList{
-		Network: []v2net.Network{v2net.Network_TCP, v2net.Network_RawTCP},
+		Network: []v2net.Network{v2net.Network_TCP},
 	}
 }
 
 // Create implements OutboundHandlerFactory.Create().
-func (v *ClientFactory) Create(space app.Space, rawConfig interface{}, meta *proxy.OutboundHandlerMeta) (proxy.OutboundHandler, error) {
+func (ClientFactory) Create(space app.Space, rawConfig interface{}, meta *proxy.OutboundHandlerMeta) (proxy.OutboundHandler, error) {
 	return NewClient(rawConfig.(*ClientConfig), space, meta)
 }

@@ -38,11 +38,11 @@ func NewDokodemoDoor(config *Config, space app.Space, meta *proxy.InboundHandler
 		port:    v2net.Port(config.Port),
 		meta:    meta,
 	}
-	space.InitializeApplication(func() error {
-		if !space.HasApp(dispatcher.APP_ID) {
+	space.OnInitialize(func() error {
+		d.packetDispatcher = dispatcher.FromSpace(space)
+		if d.packetDispatcher == nil {
 			return errors.New("Dokodemo: Dispatcher is not found in the space.")
 		}
-		d.packetDispatcher = space.GetApp(dispatcher.APP_ID).(dispatcher.PacketDispatcher)
 		return nil
 	})
 	return d
@@ -73,6 +73,10 @@ func (v *DokodemoDoor) Start() error {
 		return nil
 	}
 	v.accepting = true
+
+	if v.config.NetworkList == nil || v.config.NetworkList.Size() == 0 {
+		return errors.New("DokodemoDoor: No network specified.")
+	}
 
 	if v.config.NetworkList.HasNetwork(v2net.Network_TCP) {
 		err := v.ListenTCP()
@@ -143,6 +147,7 @@ func (v *DokodemoDoor) ListenTCP() error {
 
 func (v *DokodemoDoor) HandleTCPConnection(conn internet.Connection) {
 	defer conn.Close()
+	conn.SetReusable(false)
 
 	var dest v2net.Destination
 	if v.config.FollowRedirect {
@@ -171,13 +176,11 @@ func (v *DokodemoDoor) HandleTCPConnection(conn internet.Connection) {
 	defer output.ForceClose()
 
 	reader := v2net.NewTimeOutReader(v.config.Timeout, conn)
-	defer reader.Release()
 
 	requestDone := signal.ExecuteAsync(func() error {
 		defer ray.InboundInput().Close()
 
 		v2reader := buf.NewReader(reader)
-		defer v2reader.Release()
 
 		if err := buf.PipeUntilEOF(v2reader, ray.InboundInput()); err != nil {
 			log.Info("Dokodemo: Failed to transport all TCP request: ", err)
@@ -191,7 +194,6 @@ func (v *DokodemoDoor) HandleTCPConnection(conn internet.Connection) {
 		defer output.ForceClose()
 
 		v2writer := buf.NewWriter(conn)
-		defer v2writer.Release()
 
 		if err := buf.PipeUntilEOF(output, v2writer); err != nil {
 			log.Info("Dokodemo: Failed to transport all TCP response: ", err)
@@ -209,7 +211,7 @@ type Factory struct{}
 
 func (v *Factory) StreamCapability() v2net.NetworkList {
 	return v2net.NetworkList{
-		Network: []v2net.Network{v2net.Network_RawTCP},
+		Network: []v2net.Network{v2net.Network_TCP},
 	}
 }
 

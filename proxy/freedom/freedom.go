@@ -32,12 +32,12 @@ func New(config *Config, space app.Space, meta *proxy.OutboundHandlerMeta) *Hand
 		timeout:        config.Timeout,
 		meta:           meta,
 	}
-	space.InitializeApplication(func() error {
+	space.OnInitialize(func() error {
 		if config.DomainStrategy == Config_USE_IP {
-			if !space.HasApp(dns.APP_ID) {
+			f.dns = dns.FromSpace(space)
+			if f.dns == nil {
 				return errors.New("Freedom: DNS server is not found in the space.")
 			}
-			f.dns = space.GetApp(dns.APP_ID).(dns.Server)
 		}
 		return nil
 	})
@@ -67,10 +67,9 @@ func (v *Handler) ResolveIP(destination v2net.Destination) v2net.Destination {
 	return newDest
 }
 
-func (v *Handler) Dispatch(destination v2net.Destination, payload *buf.Buffer, ray ray.OutboundRay) {
+func (v *Handler) Dispatch(destination v2net.Destination, ray ray.OutboundRay) {
 	log.Info("Freedom: Opening connection to ", destination)
 
-	defer payload.Release()
 	input := ray.OutboundInput()
 	output := ray.OutboundOutput()
 	defer input.ForceClose()
@@ -94,19 +93,12 @@ func (v *Handler) Dispatch(destination v2net.Destination, payload *buf.Buffer, r
 	}
 	defer conn.Close()
 
-	if !payload.IsEmpty() {
-		if _, err := conn.Write(payload.Bytes()); err != nil {
-			log.Warning("Freedom: Failed to write to destination: ", destination, ": ", err)
-			return
-		}
-	}
+	conn.SetReusable(false)
 
 	requestDone := signal.ExecuteAsync(func() error {
 		defer input.ForceClose()
 
 		v2writer := buf.NewWriter(conn)
-		defer v2writer.Release()
-
 		if err := buf.PipeUntilEOF(input, v2writer); err != nil {
 			return err
 		}
@@ -127,8 +119,6 @@ func (v *Handler) Dispatch(destination v2net.Destination, payload *buf.Buffer, r
 		defer output.Close()
 
 		v2reader := buf.NewReader(reader)
-		defer v2reader.Release()
-
 		if err := buf.PipeUntilEOF(v2reader, output); err != nil {
 			return err
 		}
@@ -144,7 +134,7 @@ type Factory struct{}
 
 func (v *Factory) StreamCapability() v2net.NetworkList {
 	return v2net.NetworkList{
-		Network: []v2net.Network{v2net.Network_RawTCP},
+		Network: []v2net.Network{v2net.Network_TCP},
 	}
 }
 

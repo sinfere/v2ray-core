@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"v2ray.com/core/common"
 	"v2ray.com/core/common/errors"
 	"v2ray.com/core/common/log"
 	v2net "v2ray.com/core/common/net"
@@ -15,6 +16,7 @@ import (
 	v2tls "v2ray.com/core/transport/internet/tls"
 
 	"github.com/gorilla/websocket"
+	"v2ray.com/core/transport/internet/internal"
 )
 
 var (
@@ -156,14 +158,14 @@ func (v *WSListener) Accept() (internet.Connection, error) {
 			if connErr.err != nil {
 				return nil, connErr.err
 			}
-			return NewConnection("", connErr.conn.(*wsconn), v, v.config), nil
+			return internal.NewConnection(internal.ConnectionID{}, connErr.conn.(*wsconn), v, internal.ReuseConnection(v.config.IsConnectionReuse())), nil
 		case <-time.After(time.Second * 2):
 		}
 	}
 	return nil, ErrClosedListener
 }
 
-func (v *WSListener) Recycle(dest string, conn *wsconn) {
+func (v *WSListener) Put(id internal.ConnectionID, conn net.Conn) {
 	v.Lock()
 	defer v.Unlock()
 	if !v.acccepting {
@@ -197,5 +199,5 @@ func (v *WSListener) Close() error {
 }
 
 func init() {
-	internet.WSListenFunc = ListenWS
+	common.Must(internet.RegisterNetworkListener(v2net.Network_WebSocket, ListenWS))
 }

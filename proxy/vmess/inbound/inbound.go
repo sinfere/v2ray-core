@@ -87,15 +87,15 @@ func (v *VMessInboundHandler) Port() v2net.Port {
 }
 
 func (v *VMessInboundHandler) Close() {
+	v.Lock()
 	v.accepting = false
 	if v.listener != nil {
-		v.Lock()
 		v.listener.Close()
 		v.listener = nil
 		v.clients.Release()
 		v.clients = nil
-		v.Unlock()
 	}
+	v.Unlock()
 }
 
 func (v *VMessInboundHandler) GetUser(email string) *protocol.User {
@@ -134,8 +134,6 @@ func transferRequest(session *encoding.ServerSession, request *protocol.RequestH
 	defer output.Close()
 
 	bodyReader := session.DecodeRequestBody(request, input)
-	defer bodyReader.Release()
-
 	if err := buf.PipeUntilEOF(bodyReader, output); err != nil {
 		return err
 	}
@@ -149,18 +147,24 @@ func transferResponse(session *encoding.ServerSession, request *protocol.Request
 	bodyWriter := session.EncodeResponseBody(request, output)
 
 	// Optimize for small response packet
-	if data, err := input.Read(); err == nil {
-		if err := bodyWriter.Write(data); err != nil {
+	data, err := input.Read()
+	if err != nil {
+		return err
+	}
+
+	if err := bodyWriter.Write(data); err != nil {
+		return err
+	}
+	data.Release()
+
+	if bufferedWriter, ok := output.(*bufio.BufferedWriter); ok {
+		if err := bufferedWriter.SetBuffered(false); err != nil {
 			return err
 		}
+	}
 
-		if bufferedWriter, ok := output.(*bufio.BufferedWriter); ok {
-			bufferedWriter.SetBuffered(false)
-		}
-
-		if err := buf.PipeUntilEOF(input, bodyWriter); err != nil {
-			return err
-		}
+	if err := buf.PipeUntilEOF(input, bodyWriter); err != nil {
+		return err
 	}
 
 	if request.Option.Has(protocol.RequestOptionChunkStream) {
@@ -180,19 +184,13 @@ func (v *VMessInboundHandler) HandleConnection(connection internet.Connection) {
 	}
 
 	connReader := v2net.NewTimeOutReader(8, connection)
-	defer connReader.Release()
-
 	reader := bufio.NewReader(connReader)
-	defer reader.Release()
-
 	v.RLock()
 	if !v.accepting {
 		v.RUnlock()
 		return
 	}
 	session := encoding.NewServerSession(v.clients)
-	defer session.Release()
-
 	request, err := session.DecodeRequestHeader(reader)
 	v.RUnlock()
 
@@ -229,8 +227,6 @@ func (v *VMessInboundHandler) HandleConnection(connection internet.Connection) {
 	})
 
 	writer := bufio.NewWriter(connection)
-	defer writer.Release()
-
 	response := &protocol.ResponseHeader{
 		Command: v.generateCommand(request),
 	}
@@ -265,9 +261,6 @@ func (v *Factory) StreamCapability() v2net.NetworkList {
 }
 
 func (v *Factory) Create(space app.Space, rawConfig interface{}, meta *proxy.InboundHandlerMeta) (proxy.InboundHandler, error) {
-	if !space.HasApp(dispatcher.APP_ID) {
-		return nil, common.ErrBadConfiguration
-	}
 	config := rawConfig.(*Config)
 
 	allowedClients := vmess.NewTimedUserValidator(protocol.DefaultIDHash)
@@ -276,16 +269,23 @@ func (v *Factory) Create(space app.Space, rawConfig interface{}, meta *proxy.Inb
 	}
 
 	handler := &VMessInboundHandler{
-		packetDispatcher: space.GetApp(dispatcher.APP_ID).(dispatcher.PacketDispatcher),
-		clients:          allowedClients,
-		detours:          config.Detour,
-		usersByEmail:     NewUserByEmail(config.User, config.GetDefaultValue()),
-		meta:             meta,
+		clients:      allowedClients,
+		detours:      config.Detour,
+		usersByEmail: NewUserByEmail(config.User, config.GetDefaultValue()),
+		meta:         meta,
 	}
 
-	if space.HasApp(proxyman.APP_ID_INBOUND_MANAGER) {
-		handler.inboundHandlerManager = space.GetApp(proxyman.APP_ID_INBOUND_MANAGER).(proxyman.InboundHandlerManager)
-	}
+	space.OnInitialize(func() error {
+		handler.packetDispatcher = dispatcher.FromSpace(space)
+		if handler.packetDispatcher == nil {
+			return errors.New("VMess|Inbound: Dispatcher is not found in space.")
+		}
+		handler.inboundHandlerManager = proxyman.InboundHandlerManagerFromSpace(space)
+		if handler.inboundHandlerManager == nil {
+			return errors.New("VMess|Inbound: InboundHandlerManager is not found is space.")
+		}
+		return nil
+	})
 
 	return handler, nil
 }

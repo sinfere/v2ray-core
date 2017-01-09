@@ -1,16 +1,15 @@
 package freedom_test
 
 import (
-	"fmt"
 	"testing"
 
 	"v2ray.com/core/app"
 	"v2ray.com/core/app/dispatcher"
-	dispatchers "v2ray.com/core/app/dispatcher/impl"
+	_ "v2ray.com/core/app/dispatcher/impl"
 	"v2ray.com/core/app/dns"
-	dnsserver "v2ray.com/core/app/dns/server"
+	_ "v2ray.com/core/app/dns/server"
 	"v2ray.com/core/app/proxyman"
-	"v2ray.com/core/app/proxyman/outbound"
+	_ "v2ray.com/core/app/proxyman/outbound"
 	"v2ray.com/core/app/router"
 	"v2ray.com/core/common/buf"
 	v2net "v2ray.com/core/common/net"
@@ -44,7 +43,7 @@ func TestSinglePacket(t *testing.T) {
 		&proxy.OutboundHandlerMeta{
 			Address: v2net.AnyIP,
 			StreamSettings: &internet.StreamConfig{
-				Network: v2net.Network_RawTCP,
+				Network: v2net.Network_TCP,
 			},
 		})
 	assert.Error(space.Initialize()).IsNil()
@@ -53,9 +52,9 @@ func TestSinglePacket(t *testing.T) {
 	data2Send := "Data to be sent to remote"
 	payload := buf.NewLocal(2048)
 	payload.Append([]byte(data2Send))
+	traffic.InboundInput().Write(payload)
 
-	fmt.Println(tcpServerAddr.Network, tcpServerAddr.Address, tcpServerAddr.Port)
-	go freedom.Dispatch(tcpServerAddr, payload, traffic)
+	go freedom.Dispatch(tcpServerAddr, traffic)
 	traffic.InboundInput().Close()
 
 	respPayload, err := traffic.InboundOutput().Read()
@@ -69,16 +68,14 @@ func TestIPResolution(t *testing.T) {
 	assert := assert.On(t)
 
 	space := app.NewSpace()
-	space.BindApp(proxyman.APP_ID_OUTBOUND_MANAGER, outbound.New())
-	space.BindApp(dispatcher.APP_ID, dispatchers.NewDefaultDispatcher(space))
-	r := router.NewRouter(&router.Config{}, space)
-	space.BindApp(router.APP_ID, r)
-	dnsServer := dnsserver.NewCacheServer(space, &dns.Config{
+	assert.Error(space.AddApp(new(proxyman.OutboundConfig))).IsNil()
+	assert.Error(space.AddApp(new(dispatcher.Config))).IsNil()
+	assert.Error(space.AddApp(new(router.Config))).IsNil()
+	assert.Error(space.AddApp(&dns.Config{
 		Hosts: map[string]*v2net.IPOrDomain{
 			"v2ray.com": v2net.NewIPOrDomain(v2net.LocalHostIP),
 		},
-	})
-	space.BindApp(dns.APP_ID, dnsServer)
+	})).IsNil()
 
 	freedom := New(
 		&Config{DomainStrategy: Config_USE_IP},
@@ -86,7 +83,7 @@ func TestIPResolution(t *testing.T) {
 		&proxy.OutboundHandlerMeta{
 			Address: v2net.AnyIP,
 			StreamSettings: &internet.StreamConfig{
-				Network: v2net.Network_RawTCP,
+				Network: v2net.Network_TCP,
 			},
 		})
 

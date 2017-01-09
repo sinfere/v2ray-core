@@ -17,9 +17,10 @@ import (
 
 var (
 	kcpHeaderLoader = NewJSONConfigLoader(ConfigCreatorCache{
-		"none": func() interface{} { return new(NoOpAuthenticator) },
-		"srtp": func() interface{} { return new(SRTPAuthenticator) },
-		"utp":  func() interface{} { return new(UTPAuthenticator) },
+		"none":         func() interface{} { return new(NoOpAuthenticator) },
+		"srtp":         func() interface{} { return new(SRTPAuthenticator) },
+		"utp":          func() interface{} { return new(UTPAuthenticator) },
+		"wechat-video": func() interface{} { return new(WechatVideoAuthenticator) },
 	}, "type", "")
 
 	tcpHeaderLoader = NewJSONConfigLoader(ConfigCreatorCache{
@@ -185,7 +186,7 @@ type StreamConfig struct {
 
 func (v *StreamConfig) Build() (*internet.StreamConfig, error) {
 	config := &internet.StreamConfig{
-		Network: v2net.Network_RawTCP,
+		Network: v2net.Network_TCP,
 	}
 	if v.Network != nil {
 		config.Network = (*v.Network).Build()

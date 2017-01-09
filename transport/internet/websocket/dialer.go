@@ -5,14 +5,16 @@ import (
 	"net"
 
 	"github.com/gorilla/websocket"
+	"v2ray.com/core/common"
 	"v2ray.com/core/common/log"
 	v2net "v2ray.com/core/common/net"
 	"v2ray.com/core/transport/internet"
+	"v2ray.com/core/transport/internet/internal"
 	v2tls "v2ray.com/core/transport/internet/tls"
 )
 
 var (
-	globalCache = NewConnectionCache()
+	globalCache = internal.NewConnectionPool()
 )
 
 func Dial(src v2net.Address, dest v2net.Destination, options internet.DialerOptions) (internet.Connection, error) {
@@ -26,9 +28,9 @@ func Dial(src v2net.Address, dest v2net.Destination, options internet.DialerOpti
 	}
 	wsSettings := networkSettings.(*Config)
 
-	id := src.String() + "-" + dest.NetAddr()
+	id := internal.NewConnectionID(src, dest)
 	var conn *wsconn
-	if dest.Network == v2net.Network_TCP && wsSettings.ConnectionReuse.IsEnabled() {
+	if dest.Network == v2net.Network_TCP && wsSettings.IsConnectionReuse() {
 		connt := globalCache.Get(id)
 		if connt != nil {
 			conn = connt.(*wsconn)
@@ -42,11 +44,11 @@ func Dial(src v2net.Address, dest v2net.Destination, options internet.DialerOpti
 			return nil, err
 		}
 	}
-	return NewConnection(id, conn, globalCache, wsSettings), nil
+	return internal.NewConnection(id, conn, globalCache, internal.ReuseConnection(wsSettings.IsConnectionReuse())), nil
 }
 
 func init() {
-	internet.WSDialer = Dial
+	common.Must(internet.RegisterNetworkDialer(v2net.Network_WebSocket, Dial))
 }
 
 func wsDial(src v2net.Address, dest v2net.Destination, options internet.DialerOptions) (*wsconn, error) {
@@ -57,7 +59,7 @@ func wsDial(src v2net.Address, dest v2net.Destination, options internet.DialerOp
 	wsSettings := networkSettings.(*Config)
 
 	commonDial := func(network, addr string) (net.Conn, error) {
-		return internet.DialToDest(src, dest)
+		return internet.DialSystem(src, dest)
 	}
 
 	dialer := websocket.Dialer{
@@ -84,7 +86,11 @@ func wsDial(src v2net.Address, dest v2net.Destination, options internet.DialerOp
 		}
 	}
 
-	uri := protocol + "://" + dest.NetAddr() + "/" + wsSettings.Path
+	host := dest.NetAddr()
+	if (protocol == "ws" && dest.Port == 80) || (protocol == "wss" && dest.Port == 443) {
+		host = dest.Address.String()
+	}
+	uri := protocol + "://" + host + "/" + wsSettings.Path
 
 	conn, resp, err := dialer.Dial(uri, nil)
 	if err != nil {

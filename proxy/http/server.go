@@ -33,12 +33,19 @@ type Server struct {
 }
 
 // NewServer creates a new HTTP inbound handler.
-func NewServer(config *ServerConfig, packetDispatcher dispatcher.PacketDispatcher, meta *proxy.InboundHandlerMeta) *Server {
-	return &Server{
-		packetDispatcher: packetDispatcher,
-		config:           config,
-		meta:             meta,
+func NewServer(config *ServerConfig, space app.Space, meta *proxy.InboundHandlerMeta) *Server {
+	s := &Server{
+		config: config,
+		meta:   meta,
 	}
+	space.OnInitialize(func() error {
+		s.packetDispatcher = dispatcher.FromSpace(space)
+		if s.packetDispatcher == nil {
+			return errors.New("HTTP|Server: Dispatcher not found in space.")
+		}
+		return nil
+	})
+	return s
 }
 
 // Port implements InboundHandler.Port().
@@ -100,6 +107,8 @@ func parseHost(rawHost string, defaultPort v2net.Port) (v2net.Destination, error
 
 func (v *Server) handleConnection(conn internet.Connection) {
 	defer conn.Close()
+	conn.SetReusable(false)
+
 	timedReader := v2net.NewTimeOutReader(v.config.Timeout, conn)
 	reader := bufio.OriginalReaderSize(timedReader, 2048)
 
@@ -160,8 +169,6 @@ func (v *Server) handleConnect(request *http.Request, session *proxy.SessionInfo
 		defer ray.InboundInput().Close()
 
 		v2reader := buf.NewReader(reader)
-		defer v2reader.Release()
-
 		if err := buf.PipeUntilEOF(v2reader, ray.InboundInput()); err != nil {
 			return err
 		}
@@ -172,8 +179,6 @@ func (v *Server) handleConnect(request *http.Request, session *proxy.SessionInfo
 		defer ray.InboundOutput().ForceClose()
 
 		v2writer := buf.NewWriter(writer)
-		defer v2writer.Release()
-
 		if err := buf.PipeUntilEOF(ray.InboundOutput(), v2writer); err != nil {
 			return err
 		}
@@ -246,8 +251,6 @@ func (v *Server) handlePlainHTTP(request *http.Request, session *proxy.SessionIn
 		defer input.Close()
 
 		requestWriter := bufio.NewWriter(buf.NewBytesWriter(ray.InboundInput()))
-		defer requestWriter.Release()
-
 		err := request.Write(requestWriter)
 		if err != nil {
 			return err
@@ -289,19 +292,13 @@ type ServerFactory struct{}
 // StreamCapability implements InboundHandlerFactory.StreamCapability().
 func (v *ServerFactory) StreamCapability() v2net.NetworkList {
 	return v2net.NetworkList{
-		Network: []v2net.Network{v2net.Network_RawTCP},
+		Network: []v2net.Network{v2net.Network_TCP},
 	}
 }
 
 // Create implements InboundHandlerFactory.Create().
 func (v *ServerFactory) Create(space app.Space, rawConfig interface{}, meta *proxy.InboundHandlerMeta) (proxy.InboundHandler, error) {
-	if !space.HasApp(dispatcher.APP_ID) {
-		return nil, common.ErrBadConfiguration
-	}
-	return NewServer(
-		rawConfig.(*ServerConfig),
-		space.GetApp(dispatcher.APP_ID).(dispatcher.PacketDispatcher),
-		meta), nil
+	return NewServer(rawConfig.(*ServerConfig), space, meta), nil
 }
 
 func init() {
