@@ -71,8 +71,8 @@ func (v *DefaultDispatcher) DispatchToOutbound(session *proxy.SessionInfo) ray.I
 func (v *DefaultDispatcher) waitAndDispatch(wait func() error, destination v2net.Destination, link ray.OutboundRay, dispatcher proxy.OutboundHandler) {
 	if err := wait(); err != nil {
 		log.Info("DefaultDispatcher: Failed precondition: ", err)
-		link.OutboundInput().ForceClose()
-		link.OutboundOutput().Close()
+		link.OutboundInput().CloseError()
+		link.OutboundOutput().CloseError()
 		return
 	}
 
