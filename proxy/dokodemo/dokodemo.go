@@ -1,6 +1,7 @@
 package dokodemo
 
 import (
+	"context"
 	"sync"
 
 	"v2ray.com/core/app"
@@ -10,7 +11,6 @@ import (
 	"v2ray.com/core/common/errors"
 	"v2ray.com/core/common/log"
 	v2net "v2ray.com/core/common/net"
-	"v2ray.com/core/common/serial"
 	"v2ray.com/core/common/signal"
 	"v2ray.com/core/proxy"
 	"v2ray.com/core/transport/internet"
@@ -24,14 +24,22 @@ type DokodemoDoor struct {
 	accepting        bool
 	address          v2net.Address
 	port             v2net.Port
-	packetDispatcher dispatcher.PacketDispatcher
+	packetDispatcher dispatcher.Interface
 	tcpListener      *internet.TCPHub
 	udpHub           *udp.Hub
 	udpServer        *udp.Server
 	meta             *proxy.InboundHandlerMeta
 }
 
-func NewDokodemoDoor(config *Config, space app.Space, meta *proxy.InboundHandlerMeta) *DokodemoDoor {
+func NewDokodemoDoor(ctx context.Context, config *Config) (*DokodemoDoor, error) {
+	space := app.SpaceFromContext(ctx)
+	if space == nil {
+		return nil, errors.New("Dokodemo: No space in context.")
+	}
+	meta := proxy.InboundMetaFromContext(ctx)
+	if meta == nil {
+		return nil, errors.New("Dokodemo: No outbound meta in context.")
+	}
 	d := &DokodemoDoor{
 		config:  config,
 		address: config.GetPredefinedAddress(),
@@ -45,7 +53,7 @@ func NewDokodemoDoor(config *Config, space app.Space, meta *proxy.InboundHandler
 		}
 		return nil
 	})
-	return d
+	return d, nil
 }
 
 func (v *DokodemoDoor) Port() v2net.Port {
@@ -205,18 +213,8 @@ func (v *DokodemoDoor) HandleTCPConnection(conn internet.Connection) {
 	}
 }
 
-type Factory struct{}
-
-func (v *Factory) StreamCapability() v2net.NetworkList {
-	return v2net.NetworkList{
-		Network: []v2net.Network{v2net.Network_TCP},
-	}
-}
-
-func (v *Factory) Create(space app.Space, rawConfig interface{}, meta *proxy.InboundHandlerMeta) (proxy.InboundHandler, error) {
-	return NewDokodemoDoor(rawConfig.(*Config), space, meta), nil
-}
-
 func init() {
-	common.Must(proxy.RegisterInboundHandlerCreator(serial.GetMessageType(new(Config)), new(Factory)))
+	common.Must(common.RegisterConfig((*Config)(nil), func(ctx context.Context, config interface{}) (interface{}, error) {
+		return NewDokodemoDoor(ctx, config.(*Config))
+	}))
 }

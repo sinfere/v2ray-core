@@ -1,12 +1,14 @@
 package socks
 
 import (
+	"context"
 	"io"
 	"sync"
 	"time"
 
 	"v2ray.com/core/app"
 	"v2ray.com/core/app/dispatcher"
+	"v2ray.com/core/common"
 	"v2ray.com/core/common/buf"
 	"v2ray.com/core/common/bufio"
 	"v2ray.com/core/common/errors"
@@ -24,7 +26,7 @@ type Server struct {
 	tcpMutex         sync.RWMutex
 	udpMutex         sync.RWMutex
 	accepting        bool
-	packetDispatcher dispatcher.PacketDispatcher
+	packetDispatcher dispatcher.Interface
 	config           *ServerConfig
 	tcpListener      *internet.TCPHub
 	udpHub           *udp.Hub
@@ -34,7 +36,15 @@ type Server struct {
 }
 
 // NewServer creates a new Server object.
-func NewServer(config *ServerConfig, space app.Space, meta *proxy.InboundHandlerMeta) *Server {
+func NewServer(ctx context.Context, config *ServerConfig) (*Server, error) {
+	space := app.SpaceFromContext(ctx)
+	if space == nil {
+		return nil, errors.New("Socks|Server: No space in context.")
+	}
+	meta := proxy.InboundMetaFromContext(ctx)
+	if meta == nil {
+		return nil, errors.New("Socks|Server: No inbound meta in context.")
+	}
 	s := &Server{
 		config: config,
 		meta:   meta,
@@ -46,7 +56,7 @@ func NewServer(config *ServerConfig, space app.Space, meta *proxy.InboundHandler
 		}
 		return nil
 	})
-	return s
+	return s, nil
 }
 
 // Port implements InboundHandler.Port().
@@ -181,14 +191,8 @@ func (v *Server) transport(reader io.Reader, writer io.Writer, session *proxy.Se
 	}
 }
 
-type ServerFactory struct{}
-
-func (v *ServerFactory) StreamCapability() v2net.NetworkList {
-	return v2net.NetworkList{
-		Network: []v2net.Network{v2net.Network_TCP},
-	}
-}
-
-func (v *ServerFactory) Create(space app.Space, rawConfig interface{}, meta *proxy.InboundHandlerMeta) (proxy.InboundHandler, error) {
-	return NewServer(rawConfig.(*ServerConfig), space, meta), nil
+func init() {
+	common.Must(common.RegisterConfig((*ServerConfig)(nil), func(ctx context.Context, config interface{}) (interface{}, error) {
+		return NewServer(ctx, config.(*ServerConfig))
+	}))
 }

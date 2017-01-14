@@ -1,6 +1,7 @@
 package proxy_test
 
 import (
+	"context"
 	"testing"
 
 	"v2ray.com/core/app"
@@ -21,18 +22,20 @@ func TestProxyDial(t *testing.T) {
 	assert := assert.On(t)
 
 	space := app.NewSpace()
-	assert.Error(space.AddApp(new(proxyman.OutboundConfig)))
+	ctx := app.ContextWithSpace(context.Background(), space)
+	assert.Error(app.AddApplicationToSpace(ctx, new(proxyman.OutboundConfig))).IsNil()
 	outboundManager := proxyman.OutboundHandlerManagerFromSpace(space)
-	common.Must(outboundManager.SetHandler("tag", freedom.New(&freedom.Config{}, space, &proxy.OutboundHandlerMeta{
+	freedom, err := freedom.New(proxy.ContextWithOutboundMeta(ctx, &proxy.OutboundHandlerMeta{
 		Tag: "tag",
 		StreamSettings: &internet.StreamConfig{
-			Network: v2net.Network_TCP,
+			Protocol: internet.TransportProtocol_TCP,
 		},
-	})))
+	}), &freedom.Config{})
+	assert.Error(err).IsNil()
+	common.Must(outboundManager.SetHandler("tag", freedom))
 
-	assert.Error(space.AddApp(new(Config))).IsNil()
+	assert.Error(app.AddApplicationToSpace(ctx, new(Config))).IsNil()
 	proxy := OutboundProxyFromSpace(space)
-
 	assert.Error(space.Initialize()).IsNil()
 
 	xor := func(b []byte) []byte {
@@ -49,7 +52,7 @@ func TestProxyDial(t *testing.T) {
 
 	conn, err := proxy.Dial(v2net.LocalHostIP, dest, internet.DialerOptions{
 		Stream: &internet.StreamConfig{
-			Network: v2net.Network_TCP,
+			Protocol: internet.TransportProtocol_TCP,
 		},
 		Proxy: &internet.ProxyConfig{
 			Tag: "tag",
