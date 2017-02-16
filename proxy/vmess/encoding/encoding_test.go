@@ -1,6 +1,7 @@
 package encoding_test
 
 import (
+	"context"
 	"testing"
 
 	"v2ray.com/core/common/buf"
@@ -40,10 +41,16 @@ func TestRequestSerialization(t *testing.T) {
 	client := NewClientSession(protocol.DefaultIDHash)
 	client.EncodeRequestHeader(expectedRequest, buffer)
 
-	userValidator := vmess.NewTimedUserValidator(protocol.DefaultIDHash)
+	buffer2 := buf.New()
+	buffer2.Append(buffer.Bytes())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	sessionHistory := NewSessionHistory(ctx)
+
+	userValidator := vmess.NewTimedUserValidator(ctx, protocol.DefaultIDHash)
 	userValidator.Add(user)
 
-	server := NewServerSession(userValidator)
+	server := NewServerSession(userValidator, sessionHistory)
 	actualRequest, err := server.DecodeRequestHeader(buffer)
 	assert.Error(err).IsNil()
 
@@ -53,4 +60,10 @@ func TestRequestSerialization(t *testing.T) {
 	assert.Address(expectedRequest.Address).Equals(actualRequest.Address)
 	assert.Port(expectedRequest.Port).Equals(actualRequest.Port)
 	assert.Byte(byte(expectedRequest.Security)).Equals(byte(actualRequest.Security))
+
+	_, err = server.DecodeRequestHeader(buffer2)
+	// anti reply attack
+	assert.Error(err).IsNotNil()
+
+	cancel()
 }

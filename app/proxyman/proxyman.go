@@ -2,19 +2,35 @@
 package proxyman
 
 import (
+	"context"
+
 	"v2ray.com/core/app"
+	"v2ray.com/core/common/net"
 	"v2ray.com/core/proxy"
+	"v2ray.com/core/transport/ray"
 )
 
 type InboundHandlerManager interface {
-	GetHandler(tag string) (proxy.InboundHandler, int)
+	GetHandler(ctx context.Context, tag string) (InboundHandler, error)
+	AddHandler(ctx context.Context, config *InboundHandlerConfig) error
+}
+
+type InboundHandler interface {
+	Start() error
+	Close()
+
+	// For migration
+	GetRandomInboundProxy() (proxy.Inbound, net.Port, int)
 }
 
 type OutboundHandlerManager interface {
-	GetHandler(tag string) proxy.OutboundHandler
-	GetDefaultHandler() proxy.OutboundHandler
-	SetDefaultHandler(handler proxy.OutboundHandler) error
-	SetHandler(tag string, handler proxy.OutboundHandler) error
+	GetHandler(tag string) OutboundHandler
+	GetDefaultHandler() OutboundHandler
+	AddHandler(ctx context.Context, config *OutboundHandlerConfig) error
+}
+
+type OutboundHandler interface {
+	Dispatch(ctx context.Context, outboundRay ray.OutboundRay)
 }
 
 func InboundHandlerManagerFromSpace(space app.Space) InboundHandlerManager {

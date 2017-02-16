@@ -3,7 +3,7 @@ package protocol
 import (
 	"runtime"
 
-	v2net "v2ray.com/core/common/net"
+	"v2ray.com/core/common/net"
 	"v2ray.com/core/common/uuid"
 )
 
@@ -24,8 +24,7 @@ const (
 	// RequestOptionConnectionReuse indicates client side expects to reuse the connection.
 	RequestOptionConnectionReuse = RequestOption(0x02)
 
-	// RequestOptionCompressedStream indicates request payload is compressed.
-	RequestOptionCompressedStream = RequestOption(0x04)
+	RequestOptionChunkMasking = RequestOption(0x04)
 )
 
 func (v RequestOption) Has(option RequestOption) bool {
@@ -58,16 +57,16 @@ type RequestHeader struct {
 	Command  RequestCommand
 	Option   RequestOption
 	Security Security
-	Port     v2net.Port
-	Address  v2net.Address
+	Port     net.Port
+	Address  net.Address
 	User     *User
 }
 
-func (v *RequestHeader) Destination() v2net.Destination {
+func (v *RequestHeader) Destination() net.Destination {
 	if v.Command == RequestCommandUDP {
-		return v2net.UDPDestination(v.Address, v.Port)
+		return net.UDPDestination(v.Address, v.Port)
 	}
-	return v2net.TCPDestination(v.Address, v.Port)
+	return net.TCPDestination(v.Address, v.Port)
 }
 
 type ResponseOption byte
@@ -96,8 +95,8 @@ type ResponseHeader struct {
 }
 
 type CommandSwitchAccount struct {
-	Host     v2net.Address
-	Port     v2net.Port
+	Host     net.Address
+	Port     net.Port
 	ID       *uuid.UUID
 	AlterIds uint16
 	Level    uint32

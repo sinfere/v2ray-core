@@ -5,7 +5,6 @@ import (
 	"sync"
 
 	"v2ray.com/core/common/errors"
-	"v2ray.com/core/common/log"
 	v2net "v2ray.com/core/common/net"
 	"v2ray.com/core/common/retry"
 )
@@ -24,7 +23,8 @@ func RegisterTransportListener(protocol TransportProtocol, listener ListenFunc) 
 
 type ListenFunc func(address v2net.Address, port v2net.Port, options ListenOptions) (Listener, error)
 type ListenOptions struct {
-	Stream *StreamConfig
+	Stream       *StreamConfig
+	RecvOrigDest bool
 }
 
 type Listener interface {
@@ -51,7 +51,7 @@ func ListenTCP(address v2net.Address, port v2net.Port, callback ConnectionHandle
 	}
 	listener, err := listenFunc(address, port, options)
 	if err != nil {
-		return nil, errors.Base(err).Message("Interent|TCPHub: Failed to listen on address: ", address, ":", port)
+		return nil, errors.Base(err).Message("Internet|TCPHub: Failed to listen on address: ", address, ":", port)
 	}
 
 	hub := &TCPHub{
@@ -72,16 +72,13 @@ func (v *TCPHub) start() {
 	v.accepting = true
 	for v.accepting {
 		var newConn Connection
-		err := retry.ExponentialBackoff(10, 200).On(func() error {
+		err := retry.ExponentialBackoff(10, 500).On(func() error {
 			if !v.accepting {
 				return nil
 			}
 			conn, err := v.listener.Accept()
 			if err != nil {
-				if v.accepting {
-					log.Warning("Internet|Listener: Failed to accept new TCP connection: ", err)
-				}
-				return err
+				return errors.Base(err).Message("Internet|Listener: Failed to accept new TCP connection.")
 			}
 			newConn = conn
 			return nil

@@ -8,15 +8,14 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gorilla/websocket"
+	"v2ray.com/core/app/log"
 	"v2ray.com/core/common"
 	"v2ray.com/core/common/errors"
-	"v2ray.com/core/common/log"
 	v2net "v2ray.com/core/common/net"
 	"v2ray.com/core/transport/internet"
-	v2tls "v2ray.com/core/transport/internet/tls"
-
-	"github.com/gorilla/websocket"
 	"v2ray.com/core/transport/internet/internal"
+	v2tls "v2ray.com/core/transport/internet/tls"
 )
 
 var (
@@ -28,11 +27,34 @@ type ConnectionWithError struct {
 	err  error
 }
 
-type WSListener struct {
+type requestHandler struct {
+	path  string
+	conns chan *ConnectionWithError
+}
+
+func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
+	if request.URL.Path != h.path {
+		writer.WriteHeader(http.StatusNotFound)
+		return
+	}
+	conn, err := converttovws(writer, request)
+	if err != nil {
+		log.Info("WebSocket|Listener: Failed to convert to WebSocket connection: ", err)
+		return
+	}
+
+	select {
+	case h.conns <- &ConnectionWithError{conn: conn}:
+	default:
+		conn.Close()
+	}
+}
+
+type Listener struct {
 	sync.Mutex
 	acccepting    bool
 	awaitingConns chan *ConnectionWithError
-	listener      *StoppableListener
+	listener      net.Listener
 	tlsConfig     *tls.Config
 	config        *Config
 }
@@ -44,7 +66,7 @@ func ListenWS(address v2net.Address, port v2net.Port, options internet.ListenOpt
 	}
 	wsSettings := networkSettings.(*Config)
 
-	l := &WSListener{
+	l := &Listener{
 		acccepting:    true,
 		awaitingConns: make(chan *ConnectionWithError, 32),
 		config:        wsSettings,
@@ -52,8 +74,7 @@ func ListenWS(address v2net.Address, port v2net.Port, options internet.ListenOpt
 	if options.Stream != nil && options.Stream.HasSecuritySettings() {
 		securitySettings, err := options.Stream.GetEffectiveSecuritySettings()
 		if err != nil {
-			log.Error("WebSocket: Failed to create apply TLS config: ", err)
-			return nil, err
+			return nil, errors.Base(err).Message("WebSocket: Failed to create apply TLS config.")
 		}
 		tlsConfig, ok := securitySettings.(*v2tls.Config)
 		if ok {
@@ -66,76 +87,38 @@ func ListenWS(address v2net.Address, port v2net.Port, options internet.ListenOpt
 	return l, err
 }
 
-func (wsl *WSListener) listenws(address v2net.Address, port v2net.Port) error {
-	http.HandleFunc("/"+wsl.config.Path, func(w http.ResponseWriter, r *http.Request) {
-		con, err := wsl.converttovws(w, r)
+func (ln *Listener) listenws(address v2net.Address, port v2net.Port) error {
+	netAddr := address.String() + ":" + strconv.Itoa(int(port.Value()))
+	var listener net.Listener
+	if ln.tlsConfig == nil {
+		l, err := net.Listen("tcp", netAddr)
 		if err != nil {
-			log.Warning("WebSocket|Listener: Failed to convert connection: ", err)
-			return
+			return errors.Base(err).Message("WebSocket|Listener: Failed to listen TCP ", netAddr)
 		}
-
-		select {
-		case wsl.awaitingConns <- &ConnectionWithError{
-			conn: con,
-		}:
-		default:
-			if con != nil {
-				con.Close()
-			}
-		}
-		return
-	})
-
-	errchan := make(chan error)
-
-	listenerfunc := func() error {
-		ol, err := net.Listen("tcp", address.String()+":"+strconv.Itoa(int(port.Value())))
+		listener = l
+	} else {
+		l, err := tls.Listen("tcp", netAddr, ln.tlsConfig)
 		if err != nil {
-			return err
+			return errors.Base(err).Message("WebSocket|Listener: Failed to listen TLS ", netAddr)
 		}
-		wsl.listener, err = NewStoppableListener(ol)
-		if err != nil {
-			return err
-		}
-		return http.Serve(wsl.listener, nil)
+		listener = l
 	}
-
-	if wsl.tlsConfig != nil {
-		listenerfunc = func() error {
-			var err error
-			wsl.listener, err = getstopableTLSlistener(wsl.tlsConfig, address.String()+":"+strconv.Itoa(int(port.Value())))
-			if err != nil {
-				return err
-			}
-			return http.Serve(wsl.listener, nil)
-		}
-	}
+	ln.listener = listener
 
 	go func() {
-		err := listenerfunc()
-		errchan <- err
-		return
+		http.Serve(listener, &requestHandler{
+			path:  ln.config.GetNormailzedPath(),
+			conns: ln.awaitingConns,
+		})
 	}()
 
-	var err error
-	select {
-	case err = <-errchan:
-	case <-time.After(time.Second * 2):
-		//Should this listen fail after 2 sec, it could gone untracked.
-	}
-
-	if err != nil {
-		log.Error("WebSocket|Listener: Failed to serve: ", err)
-	}
-
-	return err
-
+	return nil
 }
 
-func (wsl *WSListener) converttovws(w http.ResponseWriter, r *http.Request) (*wsconn, error) {
+func converttovws(w http.ResponseWriter, r *http.Request) (*wsconn, error) {
 	var upgrader = websocket.Upgrader{
-		ReadBufferSize:  65536,
-		WriteBufferSize: 65536,
+		ReadBufferSize:  32 * 1024,
+		WriteBufferSize: 32 * 1024,
 	}
 	conn, err := upgrader.Upgrade(w, r, nil)
 
@@ -143,56 +126,54 @@ func (wsl *WSListener) converttovws(w http.ResponseWriter, r *http.Request) (*ws
 		return nil, err
 	}
 
-	wrapedConn := &wsconn{wsc: conn, connClosing: false}
-	wrapedConn.setup()
-	return wrapedConn, nil
+	return &wsconn{wsc: conn}, nil
 }
 
-func (v *WSListener) Accept() (internet.Connection, error) {
-	for v.acccepting {
+func (ln *Listener) Accept() (internet.Connection, error) {
+	for ln.acccepting {
 		select {
-		case connErr, open := <-v.awaitingConns:
+		case connErr, open := <-ln.awaitingConns:
 			if !open {
 				return nil, ErrClosedListener
 			}
 			if connErr.err != nil {
 				return nil, connErr.err
 			}
-			return internal.NewConnection(internal.ConnectionID{}, connErr.conn.(*wsconn), v, internal.ReuseConnection(v.config.IsConnectionReuse())), nil
+			return internal.NewConnection(internal.ConnectionID{}, connErr.conn, ln, internal.ReuseConnection(ln.config.IsConnectionReuse())), nil
 		case <-time.After(time.Second * 2):
 		}
 	}
 	return nil, ErrClosedListener
 }
 
-func (v *WSListener) Put(id internal.ConnectionID, conn net.Conn) {
-	v.Lock()
-	defer v.Unlock()
-	if !v.acccepting {
+func (ln *Listener) Put(id internal.ConnectionID, conn net.Conn) {
+	ln.Lock()
+	defer ln.Unlock()
+	if !ln.acccepting {
 		return
 	}
 	select {
-	case v.awaitingConns <- &ConnectionWithError{conn: conn}:
+	case ln.awaitingConns <- &ConnectionWithError{conn: conn}:
 	default:
 		conn.Close()
 	}
 }
 
-func (v *WSListener) Addr() net.Addr {
-	return nil
+func (ln *Listener) Addr() net.Addr {
+	return ln.listener.Addr()
 }
 
-func (v *WSListener) Close() error {
-	v.Lock()
-	defer v.Unlock()
-	v.acccepting = false
+func (ln *Listener) Close() error {
+	ln.Lock()
+	defer ln.Unlock()
+	ln.acccepting = false
 
-	v.listener.Stop()
+	ln.listener.Close()
 
-	close(v.awaitingConns)
-	for connErr := range v.awaitingConns {
+	close(ln.awaitingConns)
+	for connErr := range ln.awaitingConns {
 		if connErr.conn != nil {
-			go connErr.conn.Close()
+			connErr.conn.Close()
 		}
 	}
 	return nil

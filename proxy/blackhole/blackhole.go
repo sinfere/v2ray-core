@@ -6,11 +6,11 @@ import (
 	"time"
 
 	"v2ray.com/core/common"
-	v2net "v2ray.com/core/common/net"
+	"v2ray.com/core/proxy"
 	"v2ray.com/core/transport/ray"
 )
 
-// Handler is an outbound connection that sliently swallow the entire payload.
+// Handler is an outbound connection that silently swallow the entire payload.
 type Handler struct {
 	response ResponseConfig
 }
@@ -26,14 +26,14 @@ func New(ctx context.Context, config *Config) (*Handler, error) {
 	}, nil
 }
 
-// Dispatch implements OutboundHandler.Dispatch().
-func (v *Handler) Dispatch(destination v2net.Destination, ray ray.OutboundRay) {
-	v.response.WriteTo(ray.OutboundOutput())
-	// CloseError() will immediately close the connection.
+// Process implements OutboundHandler.Dispatch().
+func (v *Handler) Process(ctx context.Context, outboundRay ray.OutboundRay, dialer proxy.Dialer) error {
+	v.response.WriteTo(outboundRay.OutboundOutput())
 	// Sleep a little here to make sure the response is sent to client.
-	time.Sleep(time.Millisecond * 500)
-	ray.OutboundInput().CloseError()
-	ray.OutboundOutput().CloseError()
+	time.Sleep(time.Second)
+	outboundRay.OutboundOutput().CloseError()
+	time.Sleep(time.Second * 2)
+	return nil
 }
 
 func init() {

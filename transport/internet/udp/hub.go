@@ -1,26 +1,25 @@
 package udp
 
 import (
+	"context"
 	"net"
-	"sync"
 
+	"v2ray.com/core/app/log"
 	"v2ray.com/core/common/buf"
 	"v2ray.com/core/common/dice"
-	"v2ray.com/core/common/log"
 	v2net "v2ray.com/core/common/net"
-	"v2ray.com/core/common/signal"
-	"v2ray.com/core/proxy"
 	"v2ray.com/core/transport/internet/internal"
 )
 
 // Payload represents a single UDP payload.
 type Payload struct {
-	payload *buf.Buffer
-	session *proxy.SessionInfo
+	payload      *buf.Buffer
+	source       v2net.Destination
+	originalDest v2net.Destination
 }
 
 // PayloadHandler is function to handle Payload.
-type PayloadHandler func(*buf.Buffer, *proxy.SessionInfo)
+type PayloadHandler func(payload *buf.Buffer, source v2net.Destination, originalDest v2net.Destination)
 
 // PayloadQueue is a queue of Payload.
 type PayloadQueue struct {
@@ -59,7 +58,7 @@ func (v *PayloadQueue) Enqueue(payload Payload) {
 
 func (v *PayloadQueue) Dequeue(queue <-chan Payload) {
 	for payload := range queue {
-		v.callback(payload.payload, payload.session)
+		v.callback(payload.payload, payload.source, payload.originalDest)
 	}
 }
 
@@ -76,9 +75,8 @@ type ListenOption struct {
 }
 
 type Hub struct {
-	sync.RWMutex
 	conn   *net.UDPConn
-	cancel *signal.CancelSignal
+	cancel context.CancelFunc
 	queue  *PayloadQueue
 	option ListenOption
 }
@@ -94,6 +92,7 @@ func ListenUDP(address v2net.Address, port v2net.Port, option ListenOption) (*Hu
 	if err != nil {
 		return nil, err
 	}
+	log.Info("UDP|Hub: Listening on ", address, ":", port)
 	if option.ReceiveOriginalDest {
 		fd, err := internal.GetSysFd(udpConn)
 		if err != nil {
@@ -106,24 +105,20 @@ func ListenUDP(address v2net.Address, port v2net.Port, option ListenOption) (*Hu
 			return nil, err
 		}
 	}
+	ctx, cancel := context.WithCancel(context.Background())
 	hub := &Hub{
 		conn:   udpConn,
 		queue:  NewPayloadQueue(option),
 		option: option,
-		cancel: signal.NewCloseSignal(),
+		cancel: cancel,
 	}
-	go hub.start()
+	go hub.start(ctx)
 	return hub, nil
 }
 
 func (v *Hub) Close() {
-	v.Lock()
-	defer v.Unlock()
-
-	v.cancel.Cancel()
+	v.cancel()
 	v.conn.Close()
-	v.cancel.WaitForDone()
-	v.queue.Close()
 }
 
 func (v *Hub) WriteTo(payload []byte, dest v2net.Destination) (int, error) {
@@ -133,12 +128,16 @@ func (v *Hub) WriteTo(payload []byte, dest v2net.Destination) (int, error) {
 	})
 }
 
-func (v *Hub) start() {
-	v.cancel.WaitThread()
-	defer v.cancel.FinishThread()
-
+func (v *Hub) start(ctx context.Context) {
 	oobBytes := make([]byte, 256)
-	for v.Running() {
+L:
+	for {
+		select {
+		case <-ctx.Done():
+			break L
+		default:
+		}
+
 		buffer := buf.NewSmall()
 		var noob int
 		var addr *net.UDPAddr
@@ -155,23 +154,19 @@ func (v *Hub) start() {
 			continue
 		}
 
-		session := new(proxy.SessionInfo)
-		session.Source = v2net.UDPDestination(v2net.IPAddress(addr.IP), v2net.Port(addr.Port))
-		if v.option.ReceiveOriginalDest && noob > 0 {
-			session.Destination = RetrieveOriginalDest(oobBytes[:noob])
-		}
-		v.queue.Enqueue(Payload{
+		payload := Payload{
 			payload: buffer,
-			session: session,
-		})
+		}
+		payload.source = v2net.UDPDestination(v2net.IPAddress(addr.IP), v2net.Port(addr.Port))
+		if v.option.ReceiveOriginalDest && noob > 0 {
+			payload.originalDest = RetrieveOriginalDest(oobBytes[:noob])
+		}
+		v.queue.Enqueue(payload)
 	}
+	v.queue.Close()
 }
 
-func (v *Hub) Running() bool {
-	return !v.cancel.Cancelled()
-}
-
-// Connection return the net.Conn underneath this hub.
+// Connection returns the net.Conn underneath this hub.
 // Private: Visible for testing only
 func (v *Hub) Connection() net.Conn {
 	return v.conn

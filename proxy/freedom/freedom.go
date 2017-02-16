@@ -2,16 +2,18 @@ package freedom
 
 import (
 	"context"
-	"io"
+	"time"
+
+	"runtime"
 
 	"v2ray.com/core/app"
 	"v2ray.com/core/app/dns"
+	"v2ray.com/core/app/log"
 	"v2ray.com/core/common"
 	"v2ray.com/core/common/buf"
 	"v2ray.com/core/common/dice"
 	"v2ray.com/core/common/errors"
-	"v2ray.com/core/common/log"
-	v2net "v2ray.com/core/common/net"
+	"v2ray.com/core/common/net"
 	"v2ray.com/core/common/retry"
 	"v2ray.com/core/common/signal"
 	"v2ray.com/core/proxy"
@@ -23,7 +25,7 @@ type Handler struct {
 	domainStrategy Config_DomainStrategy
 	timeout        uint32
 	dns            dns.Server
-	meta           *proxy.OutboundHandlerMeta
+	destOverride   *DestinationOverride
 }
 
 func New(ctx context.Context, config *Config) (*Handler, error) {
@@ -31,14 +33,10 @@ func New(ctx context.Context, config *Config) (*Handler, error) {
 	if space == nil {
 		return nil, errors.New("Freedom: No space in context.")
 	}
-	meta := proxy.OutboundMetaFromContext(ctx)
-	if meta == nil {
-		return nil, errors.New("Freedom: No outbound meta in context.")
-	}
 	f := &Handler{
 		domainStrategy: config.DomainStrategy,
 		timeout:        config.Timeout,
-		meta:           meta,
+		destOverride:   config.DestinationOverride,
 	}
 	space.OnInitialize(func() error {
 		if config.DomainStrategy == Config_USE_IP {
@@ -53,7 +51,7 @@ func New(ctx context.Context, config *Config) (*Handler, error) {
 }
 
 // Private: Visible for testing.
-func (v *Handler) ResolveIP(destination v2net.Destination) v2net.Destination {
+func (v *Handler) ResolveIP(destination net.Destination) net.Destination {
 	if !destination.Address.Family().IsDomain() {
 		return destination
 	}
@@ -65,28 +63,38 @@ func (v *Handler) ResolveIP(destination v2net.Destination) v2net.Destination {
 	}
 
 	ip := ips[dice.Roll(len(ips))]
-	var newDest v2net.Destination
-	if destination.Network == v2net.Network_TCP {
-		newDest = v2net.TCPDestination(v2net.IPAddress(ip), destination.Port)
+	var newDest net.Destination
+	if destination.Network == net.Network_TCP {
+		newDest = net.TCPDestination(net.IPAddress(ip), destination.Port)
 	} else {
-		newDest = v2net.UDPDestination(v2net.IPAddress(ip), destination.Port)
+		newDest = net.UDPDestination(net.IPAddress(ip), destination.Port)
 	}
 	log.Info("Freedom: Changing destination from ", destination, " to ", newDest)
 	return newDest
 }
 
-func (v *Handler) Dispatch(destination v2net.Destination, ray ray.OutboundRay) {
+func (v *Handler) Process(ctx context.Context, outboundRay ray.OutboundRay, dialer proxy.Dialer) error {
+	destination, _ := proxy.TargetFromContext(ctx)
+	if v.destOverride != nil {
+		server := v.destOverride.Server
+		destination = net.Destination{
+			Network: destination.Network,
+			Address: server.Address.AsAddress(),
+			Port:    net.Port(server.Port),
+		}
+	}
 	log.Info("Freedom: Opening connection to ", destination)
 
-	input := ray.OutboundInput()
-	output := ray.OutboundOutput()
+	input := outboundRay.OutboundInput()
+	output := outboundRay.OutboundOutput()
 
 	var conn internet.Connection
 	if v.domainStrategy == Config_USE_IP && destination.Address.Family().IsDomain() {
 		destination = v.ResolveIP(destination)
 	}
+
 	err := retry.ExponentialBackoff(5, 100).On(func() error {
-		rawConn, err := internet.Dial(v.meta.Address, destination, v.meta.GetDialerOptions())
+		rawConn, err := dialer.Dial(ctx, destination)
 		if err != nil {
 			return err
 		}
@@ -94,46 +102,47 @@ func (v *Handler) Dispatch(destination v2net.Destination, ray ray.OutboundRay) {
 		return nil
 	})
 	if err != nil {
-		log.Warning("Freedom: Failed to open connection to ", destination, ": ", err)
-		return
+		return errors.Base(err).Message("Freedom: Failed to open connection to ", destination)
 	}
 	defer conn.Close()
 
 	conn.SetReusable(false)
 
+	ctx, cancel := context.WithCancel(ctx)
+	timeout := time.Second * time.Duration(v.timeout)
+	if timeout == 0 {
+		timeout = time.Minute * 10
+	}
+	timer := signal.CancelAfterInactivity(ctx, cancel, timeout)
+
 	requestDone := signal.ExecuteAsync(func() error {
 		v2writer := buf.NewWriter(conn)
-		if err := buf.PipeUntilEOF(input, v2writer); err != nil {
+		if err := buf.PipeUntilEOF(timer, input, v2writer); err != nil {
 			return err
 		}
 		return nil
 	})
-
-	var reader io.Reader = conn
-
-	timeout := v.timeout
-	if destination.Network == v2net.Network_UDP {
-		timeout = 16
-	}
-	if timeout > 0 {
-		reader = v2net.NewTimeOutReader(timeout /* seconds */, conn)
-	}
 
 	responseDone := signal.ExecuteAsync(func() error {
 		defer output.Close()
 
-		v2reader := buf.NewReader(reader)
-		if err := buf.PipeUntilEOF(v2reader, output); err != nil {
+		v2reader := buf.NewReader(conn)
+		if err := buf.PipeUntilEOF(timer, v2reader, output); err != nil {
 			return err
 		}
 		return nil
 	})
 
-	if err := signal.ErrorOrFinish2(requestDone, responseDone); err != nil {
+	if err := signal.ErrorOrFinish2(ctx, requestDone, responseDone); err != nil {
 		log.Info("Freedom: Connection ending with ", err)
 		input.CloseError()
 		output.CloseError()
+		return err
 	}
+
+	runtime.KeepAlive(timer)
+
+	return nil
 }
 
 func init() {

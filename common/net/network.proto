@@ -4,20 +4,17 @@ package v2ray.core.common.net;
 option csharp_namespace = "V2Ray.Core.Common.Net";
 option go_package = "net";
 option java_package = "com.v2ray.core.common.net";
-option java_outer_classname = "NetworkProto";
+option java_multiple_files = true;
 
 enum Network {
   Unknown = 0;
 
-  // Native TCP provided by system.
   RawTCP = 1 [deprecated=true];
-
-  // V2Ray specific TCP.
   TCP = 2;
-
   UDP = 3;
 }
 
+// NetworkList is a list of Networks.
 message NetworkList {
   repeated Network network = 1;
 }

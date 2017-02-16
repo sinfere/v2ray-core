@@ -2,17 +2,15 @@ package impl
 
 import (
 	"context"
-	"time"
 
 	"v2ray.com/core/app"
 	"v2ray.com/core/app/dispatcher"
+	"v2ray.com/core/app/log"
 	"v2ray.com/core/app/proxyman"
 	"v2ray.com/core/app/router"
 	"v2ray.com/core/common"
-	"v2ray.com/core/common/buf"
 	"v2ray.com/core/common/errors"
-	"v2ray.com/core/common/log"
-	v2net "v2ray.com/core/common/net"
+	"v2ray.com/core/common/net"
 	"v2ray.com/core/proxy"
 	"v2ray.com/core/transport/ray"
 )
@@ -39,16 +37,26 @@ func NewDefaultDispatcher(ctx context.Context, config *dispatcher.Config) (*Defa
 	return d, nil
 }
 
+func (DefaultDispatcher) Start() error {
+	return nil
+}
+
+func (DefaultDispatcher) Close() {}
+
 func (DefaultDispatcher) Interface() interface{} {
 	return (*dispatcher.Interface)(nil)
 }
 
-func (v *DefaultDispatcher) DispatchToOutbound(session *proxy.SessionInfo) ray.InboundRay {
+func (v *DefaultDispatcher) Dispatch(ctx context.Context, destination net.Destination) (ray.InboundRay, error) {
 	dispatcher := v.ohm.GetDefaultHandler()
-	destination := session.Destination
+	if !destination.IsValid() {
+		panic("Dispatcher: Invalid destination.")
+	}
+
+	ctx = proxy.ContextWithTarget(ctx, destination)
 
 	if v.router != nil {
-		if tag, err := v.router.TakeDetour(session); err == nil {
+		if tag, err := v.router.TakeDetour(ctx); err == nil {
 			if handler := v.ohm.GetHandler(tag); handler != nil {
 				log.Info("DefaultDispatcher: Taking detour [", tag, "] for [", destination, "].")
 				dispatcher = handler
@@ -60,71 +68,14 @@ func (v *DefaultDispatcher) DispatchToOutbound(session *proxy.SessionInfo) ray.I
 		}
 	}
 
-	direct := ray.NewRay()
-	var waitFunc func() error
-	if session.Inbound != nil && session.Inbound.AllowPassiveConnection {
-		waitFunc = noOpWait()
-	} else {
-		wdi := &waitDataInspector{
-			hasData: make(chan bool, 1),
-		}
-		direct.AddInspector(wdi)
-		waitFunc = waitForData(wdi)
-	}
+	direct := ray.NewRay(ctx)
+	go dispatcher.Dispatch(ctx, direct)
 
-	go v.waitAndDispatch(waitFunc, destination, direct, dispatcher)
-
-	return direct
-}
-
-func (v *DefaultDispatcher) waitAndDispatch(wait func() error, destination v2net.Destination, link ray.OutboundRay, dispatcher proxy.OutboundHandler) {
-	if err := wait(); err != nil {
-		log.Info("DefaultDispatcher: Failed precondition: ", err)
-		link.OutboundInput().CloseError()
-		link.OutboundOutput().CloseError()
-		return
-	}
-
-	dispatcher.Dispatch(destination, link)
+	return direct, nil
 }
 
 func init() {
 	common.Must(common.RegisterConfig((*dispatcher.Config)(nil), func(ctx context.Context, config interface{}) (interface{}, error) {
 		return NewDefaultDispatcher(ctx, config.(*dispatcher.Config))
 	}))
-}
-
-type waitDataInspector struct {
-	hasData chan bool
-}
-
-func (wdi *waitDataInspector) Input(*buf.Buffer) {
-	select {
-	case wdi.hasData <- true:
-	default:
-	}
-}
-
-func (wdi *waitDataInspector) WaitForData() bool {
-	select {
-	case <-wdi.hasData:
-		return true
-	case <-time.After(time.Minute):
-		return false
-	}
-}
-
-func waitForData(wdi *waitDataInspector) func() error {
-	return func() error {
-		if wdi.WaitForData() {
-			return nil
-		}
-		return errors.New("DefaultDispatcher: No data.")
-	}
-}
-
-func noOpWait() func() error {
-	return func() error {
-		return nil
-	}
 }

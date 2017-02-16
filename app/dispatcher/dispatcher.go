@@ -1,14 +1,16 @@
 package dispatcher
 
 import (
+	"context"
+
 	"v2ray.com/core/app"
-	"v2ray.com/core/proxy"
+	"v2ray.com/core/common/net"
 	"v2ray.com/core/transport/ray"
 )
 
 // Interface dispatch a packet and possibly further network payload to its destination.
 type Interface interface {
-	DispatchToOutbound(session *proxy.SessionInfo) ray.InboundRay
+	Dispatch(ctx context.Context, dest net.Destination) (ray.InboundRay, error)
 }
 
 func FromSpace(space app.Space) Interface {

@@ -18,7 +18,7 @@ func DestinationFromAddr(addr net.Addr) Destination {
 	case *net.UDPAddr:
 		return UDPDestination(IPAddress(addr.IP), Port(addr.Port))
 	default:
-		panic("Unknown address type.")
+		panic("Net: Unknown address type.")
 	}
 }
 
@@ -46,6 +46,10 @@ func (v Destination) NetAddr() string {
 
 func (v Destination) String() string {
 	return v.Network.URLPrefix() + ":" + v.NetAddr()
+}
+
+func (v Destination) IsValid() bool {
+	return v.Network != Network_Unknown
 }
 
 func (v *Endpoint) AsDestination() Destination {

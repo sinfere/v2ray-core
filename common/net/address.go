@@ -3,7 +3,7 @@ package net
 import (
 	"net"
 
-	"v2ray.com/core/common/log"
+	"v2ray.com/core/app/log"
 	"v2ray.com/core/common/predicate"
 )
 
@@ -16,6 +16,9 @@ var (
 
 	// LocalHostDomain is a constant value for localhost domain.
 	LocalHostDomain = DomainAddress("localhost")
+
+	// LocalHostIPv6 is a constant value for localhost IP in IPv6.
+	LocalHostIPv6 = IPAddress([]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1})
 )
 
 type AddressFamily int
@@ -85,7 +88,7 @@ func IPAddress(ip []byte) Address {
 		}
 		return addr
 	default:
-		log.Error("Invalid IP format: ", ip)
+		log.Error("Net: Invalid IP format: ", ip)
 		return nil
 	}
 }

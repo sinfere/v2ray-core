@@ -1,12 +1,13 @@
 package websocket
 
 import (
-	"io/ioutil"
+	"context"
 	"net"
 
 	"github.com/gorilla/websocket"
+	"v2ray.com/core/app/log"
 	"v2ray.com/core/common"
-	"v2ray.com/core/common/log"
+	"v2ray.com/core/common/errors"
 	v2net "v2ray.com/core/common/net"
 	"v2ray.com/core/transport/internet"
 	"v2ray.com/core/transport/internet/internal"
@@ -17,28 +18,19 @@ var (
 	globalCache = internal.NewConnectionPool()
 )
 
-func Dial(src v2net.Address, dest v2net.Destination, options internet.DialerOptions) (internet.Connection, error) {
-	log.Info("WebSocket|Dailer: Creating connection to ", dest)
-	if src == nil {
-		src = v2net.AnyIP
-	}
-	networkSettings, err := options.Stream.GetEffectiveTransportSettings()
-	if err != nil {
-		return nil, err
-	}
-	wsSettings := networkSettings.(*Config)
+func Dial(ctx context.Context, dest v2net.Destination) (internet.Connection, error) {
+	log.Info("WebSocket|Dialer: Creating connection to ", dest)
+	src := internet.DialerSourceFromContext(ctx)
+	wsSettings := internet.TransportSettingsFromContext(ctx).(*Config)
 
 	id := internal.NewConnectionID(src, dest)
-	var conn *wsconn
+	var conn net.Conn
 	if dest.Network == v2net.Network_TCP && wsSettings.IsConnectionReuse() {
-		connt := globalCache.Get(id)
-		if connt != nil {
-			conn = connt.(*wsconn)
-		}
+		conn = globalCache.Get(id)
 	}
 	if conn == nil {
 		var err error
-		conn, err = wsDial(src, dest, options)
+		conn, err = wsDial(ctx, dest)
 		if err != nil {
 			log.Warning("WebSocket|Dialer: Dial failed: ", err)
 			return nil, err
@@ -51,12 +43,9 @@ func init() {
 	common.Must(internet.RegisterTransportDialer(internet.TransportProtocol_WebSocket, Dial))
 }
 
-func wsDial(src v2net.Address, dest v2net.Destination, options internet.DialerOptions) (*wsconn, error) {
-	networkSettings, err := options.Stream.GetEffectiveTransportSettings()
-	if err != nil {
-		return nil, err
-	}
-	wsSettings := networkSettings.(*Config)
+func wsDial(ctx context.Context, dest v2net.Destination) (net.Conn, error) {
+	src := internet.DialerSourceFromContext(ctx)
+	wsSettings := internet.TransportSettingsFromContext(ctx).(*Config)
 
 	commonDial := func(network, addr string) (net.Conn, error) {
 		return internet.DialSystem(src, dest)
@@ -64,21 +53,16 @@ func wsDial(src v2net.Address, dest v2net.Destination, options internet.DialerOp
 
 	dialer := websocket.Dialer{
 		NetDial:         commonDial,
-		ReadBufferSize:  65536,
-		WriteBufferSize: 65536,
+		ReadBufferSize:  32 * 1024,
+		WriteBufferSize: 32 * 1024,
 	}
 
 	protocol := "ws"
 
-	if options.Stream != nil && options.Stream.HasSecuritySettings() {
-		protocol = "wss"
-		securitySettings, err := options.Stream.GetEffectiveSecuritySettings()
-		if err != nil {
-			log.Error("WebSocket: Failed to create security settings: ", err)
-			return nil, err
-		}
+	if securitySettings := internet.SecuritySettingsFromContext(ctx); securitySettings != nil {
 		tlsConfig, ok := securitySettings.(*v2tls.Config)
 		if ok {
+			protocol = "wss"
 			dialer.TLSClientConfig = tlsConfig.GetTLSConfig()
 			if dest.Address.Family().IsDomain() {
 				dialer.TLSClientConfig.ServerName = dest.Address.Domain()
@@ -90,23 +74,18 @@ func wsDial(src v2net.Address, dest v2net.Destination, options internet.DialerOp
 	if (protocol == "ws" && dest.Port == 80) || (protocol == "wss" && dest.Port == 443) {
 		host = dest.Address.String()
 	}
-	uri := protocol + "://" + host + "/" + wsSettings.Path
+	uri := protocol + "://" + host + wsSettings.GetNormailzedPath()
 
 	conn, resp, err := dialer.Dial(uri, nil)
 	if err != nil {
+		var reason string
 		if resp != nil {
-			reason, reasonerr := ioutil.ReadAll(resp.Body)
-			log.Info(string(reason), reasonerr)
+			reason = resp.Status
 		}
-		return nil, err
+		return nil, errors.Base(err).Message("WebSocket|Dialer: Failed to dial to (", uri, "): ", reason)
 	}
-	return func() internet.Connection {
-		connv2ray := &wsconn{
-			wsc:         conn,
-			connClosing: false,
-			config:      wsSettings,
-		}
-		connv2ray.setup()
-		return connv2ray
-	}().(*wsconn), nil
+
+	return &wsconn{
+		wsc: conn,
+	}, nil
 }

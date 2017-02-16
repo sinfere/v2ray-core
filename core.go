@@ -1,4 +1,12 @@
-// Package core provides common definitions and functionalities of V2Ray.
+// Package core provides an entry point to use V2Ray core functionalities.
+//
+// V2Ray makes it possible to accept incoming network connections with certain
+// protocol, process the data, and send them through another connection with
+// the same or a difference protocol on demand.
+//
+// It may be configured to work with multiple protocols at the same time, and
+// uses the internal router to tunnel through different inbound and outbound
+// connections.
 package core
 
 import (
@@ -8,7 +16,7 @@ import (
 )
 
 var (
-	version  = "2.15"
+	version  = "2.19"
 	build    = "Custom"
 	codename = "One for all"
 	intro    = "An unified platform for anti-censorship."
@@ -19,8 +27,9 @@ func Version() string {
 	return version
 }
 
+// PrintVersion prints current version into console.
 func PrintVersion() {
-	fmt.Printf("V2Ray %s (%s) %s%s", version, codename, build, platform.LineSeparator())
+	fmt.Printf("V2Ray %s (%s) %s%s", Version(), codename, build, platform.LineSeparator())
 	fmt.Printf("%s%s", intro, platform.LineSeparator())
 }
 
